@@ -95,7 +95,7 @@ canvas{display:block;transition:filter .6s ease}
 .title .b{color:var(--mag);text-shadow:0 0 24px var(--mag),0 0 80px rgba(255,46,136,.5)}
 .sub{margin-top:10px;font-size:12px;letter-spacing:4px;color:#7ee9f2;opacity:.85}
 .seed{margin-top:6px;font-size:11px;letter-spacing:2px;color:rgba(255,255,255,.4)}
-.bigbtn{margin-top:34px;pointer-events:auto;cursor:pointer;font-family:'Chakra Petch',monospace;font-weight:700;font-size:18px;letter-spacing:4px;color:var(--void);background:linear-gradient(135deg,var(--cyan),#7dffea);border:none;padding:16px 52px;border-radius:6px;box-shadow:0 0 24px rgba(25,240,255,.6),inset 0 -3px 0 rgba(0,0,0,.25);transition:transform .1s;animation:pulse 1.8s ease-in-out infinite}
+.bigbtn{margin-top:34px;cursor:pointer;font-family:'Chakra Petch',monospace;font-weight:700;font-size:18px;letter-spacing:4px;color:var(--void);background:linear-gradient(135deg,var(--cyan),#7dffea);border:none;padding:16px 52px;border-radius:6px;box-shadow:0 0 24px rgba(25,240,255,.6),inset 0 -3px 0 rgba(0,0,0,.25);transition:transform .1s;animation:pulse 1.8s ease-in-out infinite}
 .bigbtn:active{transform:scale(.94) translateY(2px)}
 @keyframes pulse{0%,100%{box-shadow:0 0 18px rgba(25,240,255,.45),inset 0 -3px 0 rgba(0,0,0,.25)}50%{box-shadow:0 0 34px rgba(25,240,255,.85),inset 0 -3px 0 rgba(0,0,0,.25)}}
 .hint{margin-top:24px;font-size:11px;letter-spacing:2px;color:rgba(255,255,255,.45);line-height:1.9;text-align:center}
@@ -523,6 +523,12 @@ function setShipColor(hex){for(const m of shipMats)m.color.set(hex);
   const dcore=new THREE.Mesh(new THREE.TetrahedronGeometry(.3),new THREE.MeshStandardMaterial({color:0x7dffea,emissive:0x7dffea,emissiveIntensity:1}));
   droneMesh.add(dcore);droneMesh.add(glowSprite(0x7dffea,1.2,.5));
   droneMesh.visible=false;scene.add(droneMesh)})();
+/* heading chevron — shows flight direction at a glance */
+const headArrow=new THREE.Mesh(new THREE.ConeGeometry(.3,.7,3),
+  new THREE.MeshBasicMaterial({color:0x19f0ff,transparent:true,opacity:.75,blending:THREE.AdditiveBlending,depthWrite:false}));
+headArrow.rotation.x=Math.PI/2; /* lie flat, point along +z of its group */
+const headGrp=new THREE.Group();headGrp.add(headArrow);headArrow.position.z=1.55;headArrow.position.y=.12;
+scene.add(headGrp);
 function setFrenzyVisual(on){
   const c=on?0xffc34d:0x19f0ff;
   setShipColor(c);
@@ -745,27 +751,53 @@ function updateBoostHud(){
   $('shieldN').textContent='AEGIS ×'+STATE.shield;
   shieldBubble.material.opacity=STATE.shield>0?.3+Math.sin(STATE.time*5)*.1:0}
 
-/* ================= INPUT — steer & tap-dash ================= */
-const input={dir:new THREE.Vector2(),smooth:new THREE.Vector2(),touch:false,anchor:null,moved:false,t0:0,keys:{}};
+/* ================= INPUT — steer & tap-dash (multi-touch aware) =================
+   design:
+   - first finger = steering: drag direction sets target heading (anchor follows, 48px radius)
+   - quick tap (<220ms, <8px) with that finger = dash
+   - ANY second finger while steering = instant dash on touch-down (two-thumb play)
+   - synthesized mouse events after touches are ignored (ghost-click guard)            */
+const input={dir:new THREE.Vector2(),smooth:new THREE.Vector2(),keys:{},
+  steerId:null,anchor:null,moved:false,t0:0,lastTouchTime:0};
+function gameTouchable(e){
+  if(STATE.mode!=='play'&&STATE.mode!=='upgrade')return false;
+  if(e.target.closest('.card')||e.target.closest('button'))return false;
+  return true}
 addEventListener('touchstart',e=>{
-  if(STATE.mode!=='play'&&STATE.mode!=='upgrade')return;
-  if(e.target.closest('.card')||e.target.closest('button'))return;
+  input.lastTouchTime=performance.now();
+  if(!gameTouchable(e))return;
   e.preventDefault();
-  input.anchor={x:e.touches[0].clientX,y:e.touches[0].clientY};
-  input.touch=true;input.moved=false;input.t0=performance.now()},{passive:false});
-addEventListener('touchmove',e=>{if(!input.touch||!input.anchor)return;e.preventDefault();
-  const p={x:e.touches[0].clientX,y:e.touches[0].clientY};
-  let dx=p.x-input.anchor.x,dy=p.y-input.anchor.y;
-  const len=Math.hypot(dx,dy);
-  if(len>10)input.moved=true;
-  if(len<10){return} /* below steer threshold */
-  const cap=58;if(len>cap){input.anchor.x=p.x-dx/len*cap;input.anchor.y=p.y-dy/len*cap}
-  input.dir.set(dx/len,dy/len)},{passive:false});
-addEventListener('touchend',e=>{if(e.touches.length===0){
-  /* quick tap without steering = DASH */
-  if(input.touch&&!input.moved&&performance.now()-input.t0<240)tryDash();
-  input.touch=false;input.dir.set(0,0);input.anchor=null}},{passive:false});
-addEventListener('mousedown',e=>{ /* desktop: click = dash */
+  for(const t of e.changedTouches){
+    if(input.steerId===null){ /* first finger: steering */
+      input.steerId=t.identifier;
+      input.anchor={x:t.clientX,y:t.clientY};
+      input.moved=false;input.t0=performance.now()}
+    else{ /* any extra finger: instant dash */
+      tryDash()}}},{passive:false});
+addEventListener('touchmove',e=>{
+  if(input.steerId===null)return;
+  e.preventDefault();
+  for(const t of e.changedTouches){
+    if(t.identifier!==input.steerId||!input.anchor)continue;
+    let dx=t.clientX-input.anchor.x,dy=t.clientY-input.anchor.y;
+    const len=Math.hypot(dx,dy);
+    if(len>8)input.moved=true;
+    if(len<8)continue; /* deadzone */
+    const cap=48; /* tight follow-stick: quick reversals */
+    if(len>cap){input.anchor.x=t.clientX-dx/len*cap;input.anchor.y=t.clientY-dy/len*cap}
+    input.dir.set(dx/len,dy/len)}},{passive:false});
+function endSteer(){input.steerId=null;input.anchor=null;input.dir.set(0,0)}
+addEventListener('touchend',e=>{
+  input.lastTouchTime=performance.now();
+  for(const t of e.changedTouches){
+    if(t.identifier===input.steerId){
+      /* quick tap without steering = dash */
+      if(!input.moved&&performance.now()-input.t0<220)tryDash();
+      endSteer()}}},{passive:false});
+addEventListener('touchcancel',e=>{
+  for(const t of e.changedTouches)if(t.identifier===input.steerId)endSteer()},{passive:false});
+addEventListener('mousedown',e=>{ /* desktop click = dash; ignore ghost-clicks from touch */
+  if(performance.now()-input.lastTouchTime<800)return;
   if(STATE.mode!=='play')return;
   if(e.target.closest('button')||e.target.closest('.card'))return;
   tryDash()});
@@ -776,12 +808,13 @@ addEventListener('keyup',e=>{input.keys[e.code]=false});
 function keyDir(){let x=0,y=0;
   if(input.keys.KeyW||input.keys.ArrowUp)y-=1;if(input.keys.KeyS||input.keys.ArrowDown)y+=1;
   if(input.keys.KeyA||input.keys.ArrowLeft)x-=1;if(input.keys.KeyD||input.keys.ArrowRight)x+=1;
-  if(x||y){const l=Math.hypot(x,y);input.dir.set(x/l,y/l)}else if(!input.touch)input.dir.set(0,0)}
+  if(x||y){const l=Math.hypot(x,y);input.dir.set(x/l,y/l)}else if(input.steerId===null)input.dir.set(0,0)}
 
-function tryDash(){if(STATE.mode!=='play'||PLAYER.charges<=0)return;
+function doDash(){
   if(PLAYER.charges===PLAYER.dashMax)PLAYER.chargeT=PLAYER.dashCdMax;
   PLAYER.charges--;
   PLAYER.dashT=.18;PLAYER.invuln=Math.max(PLAYER.invuln,.22);
+  PLAYER.moving=true;
   AU.dash();buzz(12);
   burst(PLAYER.pos.x,.4,PLAYER.pos.z,0x19f0ff,12,6);
   const novaLv=lvOf('nova');
@@ -790,13 +823,18 @@ function tryDash(){if(STATE.mode!=='play'||PLAYER.charges<=0)return;
     for(const e of [...enemies]){const d=e.pos.distanceTo(PLAYER.pos);
       if(d<r&&d>.01)hurtEnemy(e,Math.ceil(PLAYER.dmg*(1.2+novaLv*.6)),(e.pos.x-PLAYER.pos.x)/d,(e.pos.z-PLAYER.pos.z)/d,false)}}
   if(lvOf('fire')>0)PLAYER.fireTrailT=.32}
+function tryDash(){if(STATE.mode!=='play')return;
+  if(PLAYER.charges<=0){PLAYER.dashBuf=.3;return} /* buffer: fires the moment a charge returns */
+  doDash()}
 function updateDashCharges(dt){
+  if(PLAYER.dashBuf>0)PLAYER.dashBuf-=dt;
   if(PLAYER.charges<PLAYER.dashMax){
     PLAYER.chargeT-=dt;
     if(PLAYER.chargeT<=0){PLAYER.charges++;
       AU.ui();
       burst(PLAYER.pos.x,.9,PLAYER.pos.z,0x19f0ff,6,3);
-      if(PLAYER.charges<PLAYER.dashMax)PLAYER.chargeT=PLAYER.dashCdMax}}}
+      if(PLAYER.charges<PLAYER.dashMax)PLAYER.chargeT=PLAYER.dashCdMax;
+      if(PLAYER.dashBuf>0){PLAYER.dashBuf=0;doDash()}}}}
 
 /* ================= CAMERA — calm & smooth ================= */
 let camKick=new THREE.Vector3();
@@ -1356,13 +1394,17 @@ function update(dt){
   if(input.dir.lengthSq()>.03){
     PLAYER.targetHeading.set(input.dir.x,input.dir.y).normalize();
     PLAYER.moving=true}
-  /* smooth-turn toward target heading */
+  /* smooth-turn toward target heading — turns faster the bigger the correction */
   {const cur=Math.atan2(PLAYER.heading.y,PLAYER.heading.x);
    const tg=Math.atan2(PLAYER.targetHeading.y,PLAYER.targetHeading.x);
    let dA=tg-cur;while(dA>Math.PI)dA-=Math.PI*2;while(dA<-Math.PI)dA+=Math.PI*2;
-   const maxTurn=11*dt;
+   const maxTurn=(8+Math.abs(dA)*5)*dt; /* small drift ≈8 rad/s, full reverse ≈24 rad/s */
    const nA=cur+Math.max(-maxTurn,Math.min(maxTurn,dA));
    PLAYER.heading.set(Math.cos(nA),Math.sin(nA))}
+  /* heading chevron */
+  headGrp.position.copy(PLAYER.pos);
+  headGrp.rotation.y=Math.atan2(PLAYER.heading.x,PLAYER.heading.y);
+  headArrow.material.opacity=PLAYER.moving?(.55+Math.sin(STATE.time*5)*.15):0;
   const throttle=PLAYER.moving?1:0;
   let sp=PLAYER.speed*throttle;
   if(PLAYER.dashT>0){PLAYER.dashT-=dt;sp=26;
@@ -1422,11 +1464,13 @@ function resetRun(){
   Object.assign(STATE,{time:0,round:1,roundEndsAt:30,bossCount:0,score:0,shownScore:0,mult:1,kills:0,combo:0,comboT:0,maxCombo:0,
     trauma:0,hitstop:0,timescale:1,tsTimer:0,level:1,xp:0,xpNeed:10,nextBossAt:55,
     frenzyT:0,overclockT:0,shield:0,enemySlow:1});
-  Object.assign(PLAYER,{speed:7.4,hpMax:5,hp:5,invuln:0,dashT:0,dashMax:1,charges:1,chargeT:0,dashCdMax:2.3,moving:false,
+  Object.assign(PLAYER,{speed:7.4,hpMax:5,hp:5,invuln:0,dashT:0,dashMax:1,charges:1,chargeT:0,dashCdMax:2.3,moving:false,dashBuf:0,
     dmg:1,fireInt:.34,fireT:0,projSpeed:19,multishot:1,pierce:0,crit:.08,knock:1,magnet:3.8,
     upg:{},orbAngle:0,droneT:0,missileT:0,bhT:6,trailT:0,fireTrailT:0,xpBarFade:0});
   PLAYER.pos.set(0,0,0);input.smooth.set(0,0);camLook.set(0,0,0);
   PLAYER.heading.set(1,0);PLAYER.targetHeading.set(1,0);
+  headArrow.material.opacity=0;headGrp.position.set(0,0,0);
+  endSteer();
   setFrenzyVisual(false);
   ring.material.color.set(tierColor(0));
   OBJ.active=null;OBJ.cooldown=12;
